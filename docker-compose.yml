@@ -1,0 +1,80 @@
+services:
+  gophermart_db:
+    container_name: gophermart.db
+    hostname: gophermart.db
+    image: postgres:17.6-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - gophermart_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  accrual:
+    container_name: gophermart.accrual
+    hostname: accrual
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: accrual
+    restart: unless-stopped
+    ports:
+      - "${ACCRUAL_PORT:-8081}:8080"
+
+  gophermart_app:
+    container_name: gophermart.app
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    volumes:
+      - ./migrations:/app/migrations
+    depends_on:
+      gophermart_db:
+        condition: service_healthy
+      accrual:
+        condition: service_started
+    environment:
+      - RUN_ADDRESS=:8080
+      - DATABASE_URI=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@gophermart_db:5432/${POSTGRES_DB}?sslmode=disable
+      - ACCRUAL_SYSTEM_ADDRESS=http://accrual:8080
+
+  integration_tests:
+    container_name: gophermart.integration_tests
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: integration
+    environment:
+      - DATABASE_URI=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@gophermart_db:5432/${POSTGRES_DB}?sslmode=disable
+      - RUN_ADDRESS=:8080
+      - ACCRUAL_SYSTEM_ADDRESS=http://127.0.0.1:8080
+    env_file:
+      - .env
+    command:
+      - sh
+      - -ec
+      - |
+        ./accrual/accrual_linux_amd64 &
+        sleep 2
+        ./gophermart -a :8888 -d "$$DATABASE_URI" -r http://127.0.0.1:8080 &
+        sleep 3
+        go test -tags=integration -v -count=1 -run TestIntegration ./internal/service/...
+    depends_on:
+      gophermart_db:
+        condition: service_healthy
+
+volumes:
+  gophermart_postgres_data:
